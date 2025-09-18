@@ -33,10 +33,17 @@ TEMPLATES = {
 }
 DAILY_LIMIT = int(os.getenv('DAILY_LIMIT', '0'))
 DRY_RUN = (os.getenv('DRY_RUN', 'false').strip().lower() in ('1','true','yes','y'))
+VERBOSE = (os.getenv('VERBOSE', 'false').strip().lower() in ('1','true','yes','y'))
 
 # LLM configuration (supports OpenAI, Azure OpenAI, or GitHub Models)
 USE_LLM = (os.getenv('USE_LLM', 'true').strip().lower() in ('1','true','yes','y'))
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").lower()  # openai|azure|github
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "github").lower()  # openai|azure|github
+
+if LLM_PROVIDER == 'github':
+    LLM_MODEL = os.getenv("GITHUB_MODEL", "gpt-4o-mini")
+elif LLM_PROVIDER == 'azure':
+    LLM_MODEL = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-o4-mini")
+
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 
 # OpenAI (api.openai.com)
@@ -90,6 +97,18 @@ def get_llm_client_and_model():
         return client, model_name
     else:
         raise RuntimeError(f"Unsupported LLM_PROVIDER: {provider}")
+
+# Lightweight logging helpers
+def _log(msg: str):
+    if VERBOSE:
+        print(msg)
+
+def _warn(msg: str):
+    if VERBOSE:
+        print(f"WARN: {msg}")
+
+def _error(msg: str):
+    print(f"ERROR: {msg}")
 
 # Optional resume attachment (can be overridden via env)
 RESUME_PATH = os.getenv('RESUME_PATH', "Ashutosh_Choudhari_Resume.pdf")
@@ -332,13 +351,24 @@ def save_sent_log(log):
     with open(SENT_LOG, 'w', encoding='utf-8') as f:
         json.dump(log, f, indent=2)
 
-def already_sent(log, email, role, company):
-    k = f'{email.lower()}::{role.lower()}::{company.lower()}'
-    return k in log
+def already_sent(log, name, email, role, company):
+    """Return True if this contact/role/company appears already sent.
+    New format uses name-based key to avoid storing emails; we still honor legacy email-based keys.
+    """
+    new_key = f"{(name or '').lower()}::{(role or '').lower()}::{(company or '').lower()}"
+    old_key = f"{(email or '').lower()}::{(role or '').lower()}::{(company or '').lower()}"
+    return new_key in log or old_key in log
 
-def mark_sent(log, email, role, company, msg_id):
-    k = f'{email.lower()}::{role.lower()}::{company.lower()}'
-    log[k] = {'msg_id': msg_id, 'ts': int(time.time())}
+def mark_sent(log, name, email, role, company, msg_id):
+    """Mark sent using name-based key; also remove legacy email-based key if present."""
+    new_key = f"{(name or '').lower()}::{(role or '').lower()}::{(company or '').lower()}"
+    old_key = f"{(email or '').lower()}::{(role or '').lower()}::{(company or '').lower()}"
+    log[new_key] = {'msg_id': msg_id, 'ts': int(time.time())}
+    if old_key in log:
+        try:
+            del log[old_key]
+        except Exception:
+            pass
 
 def parse_resume_map():
     raw = os.getenv('RESUME_MAP', '').strip()
@@ -542,13 +572,16 @@ def main():
         template_kind = (row.get('template', 'cold') or 'cold').lower()
         sheet_row = int(row.get('sheet_row', 0) or 0)
 
-        # If the sheet includes a status column, skip rows already marked as SENT
+        # If the sheet includes a status column, skip rows already marked as SENT/DONE
         raw_status = (row.get('status') or row.get('email_sent') or '').strip()
         status_val = raw_status.upper()
         # Consider various truthy forms as already sent
         if status_val in {'SENT', 'YES', 'TRUE', '1', 'DONE'}:
-            print(f'SKIP (sheet marked SENT) -> {email} ({role} @ {company})')
+            _log(f'SKIP (sheet marked SENT) -> {email} ({role} @ {company})')
             continue
+        # Explicitly treat 'required_field_missing' rows as pending: re-validate and proceed if now complete
+        if status_val == 'REQUIRED_FIELD_MISSING':
+            _log(f'Revalidating previously incomplete row -> {email} ({role} @ {company})')
 
         # Required field enforcement
         missing = []
@@ -561,22 +594,29 @@ def main():
         resume_flag_val = (row.get('resume_flag') or row.get('resume') or '').strip()
         if not resume_flag_val: missing.append('resume')
         if missing:
-            print(f"REQUIRED FIELD MISSING {missing} -> {email or '(no email)'} ({role or '(no role)'} @ {company or '(no company)'})")
+            _log(f"REQUIRED FIELD MISSING {missing} -> {email or '(no email)'} ({role or '(no role)'} @ {company or '(no company)'})")
             # Write back 'required_field_missing' to status/email_sent
             if spreadsheet_id and sheet_row:
                 try:
                     mark_sheet_row_sent(spreadsheet_id, sheet_row, status_value='required_field_missing')
                 except Exception as e:
-                    print(f'WARN: failed to mark sheet row {sheet_row} (missing fields): {e}')
+                    _error(f'failed to mark sheet row {sheet_row} (missing fields): {e}')
             continue
+        else:
+            # If this row was previously marked as required_field_missing and now passes validation, clear the status to signal it's ready
+            if status_val == 'REQUIRED_FIELD_MISSING' and spreadsheet_id and sheet_row:
+                try:
+                    mark_sheet_row_sent(spreadsheet_id, sheet_row, status_value='')
+                except Exception as e:
+                    _error(f'failed to clear status for sheet row {sheet_row}: {e}')
 
-        if already_sent(sent_log, email, role, company):
-            print(f'SKIP already sent -> {email} ({role} @ {company})')
+        if already_sent(sent_log, name, email, role, company):
+            _log(f'SKIP already sent -> {email} ({role} @ {company})')
             continue
 
         # If DAILY_LIMIT<=0, treat as unlimited
         if DAILY_LIMIT > 0 and sent_count >= DAILY_LIMIT:
-            print('Daily limit reached. Stopping.')
+            _log('Daily limit reached. Stopping.')
             break
 
         row_dict = row.to_dict()
@@ -592,10 +632,10 @@ def main():
                 else:
                     inspiration = 'warm' if (note and note.strip()) else 'cold'
                 intent = 'coffee' if inspiration == 'coffee' else ('direct' if inspiration == 'direct' else None)
-                print(f"LLM mode -> provider={LLM_PROVIDER}, model={LLM_MODEL or os.getenv('GITHUB_MODEL','')}; style inspiration={inspiration}; intent={intent or 'auto'}")
+                _log(f"LLM mode -> provider={LLM_PROVIDER}, model={LLM_MODEL or os.getenv('GITHUB_MODEL','')}; style inspiration={inspiration}; intent={intent or 'auto'}")
                 subject, body = generate_email_with_llm(row_dict, inspiration_kind=inspiration, intent=intent)
             except Exception as e:
-                print(f"LLM error for {email}: {e} -> falling back to template '{template_kind}'")
+                _error(f"LLM error for {email}: {e} -> falling back to template '{template_kind}'")
                 tpl = load_template(template_kind)
                 rendered = tpl.render(name=name, company=company, role=role, personalized_note=note, job_link=job_link, job_id=job_id)
                 lines = rendered.splitlines()
@@ -626,38 +666,39 @@ def main():
         try:
             attachment = get_resume_attachment(drive_service, resume_flag)
         except Exception as e:
-            print(f'WARN: Failed to fetch resume for flag "{resume_flag}": {e}')
+            _error(f'Failed to fetch resume for flag "{resume_flag}": {e}')
 
         if DRY_RUN:
             att_info = f"yes ({attachment.get('filename')})" if attachment else (f"yes ({Path(RESUME_PATH).name})" if Path(RESUME_PATH).exists() else 'no')
-            print(f'-- DRY RUN -- To: {email}\nSubject: {subject}\n{body}\n(attached: {att_info})\n---')
-            mark_sent(sent_log, email, role, company, 'DRY_RUN')
+            if VERBOSE:
+                print(f'-- DRY RUN -- To: {email}\nSubject: {subject}\n{body}\n(attached: {att_info})\n---')
+            mark_sent(sent_log, name, email, role, company, 'DRY_RUN')
             if spreadsheet_id and sheet_row:
                 try:
                     mark_sheet_row_sent(spreadsheet_id, sheet_row, status_value='DRY_RUN')
                 except Exception as e:
-                    print(f'WARN: failed to mark sheet row {sheet_row} (dry run): {e}')
+                    _error(f'failed to mark sheet row {sheet_row} (dry run): {e}')
             continue
 
         try:
             message = create_message_with_attachment(email, subject, body, attachment=attachment, attachment_path=None)
             resp = send_message(service, 'me', message)
             msg_id = resp.get('id', 'UNKNOWN')
-            mark_sent(sent_log, email, role, company, msg_id)
+            mark_sent(sent_log, name, email, role, company, msg_id)
             sent_count += 1
-            print(f'SENT -> {email} (id={msg_id})')
+            _log(f'SENT -> {email} (id={msg_id})')
             save_sent_log(sent_log)
             if spreadsheet_id and sheet_row:
                 try:
                     mark_sheet_row_sent(spreadsheet_id, sheet_row, status_value='SENT')
                 except Exception as e:
-                    print(f'WARN: failed to mark sheet row {sheet_row}: {e}')
+                    _error(f'failed to mark sheet row {sheet_row}: {e}')
             time.sleep(1.5)  # gentle pace
         except Exception as e:
-            print(f'ERROR sending to {email}: {e}')
+            _error(f'ERROR sending to {email}: {e}')
 
     save_sent_log(sent_log)
-    print(f'Done. Sent {sent_count}.')
+    _log(f'Done. Sent {sent_count}.')
 
 if __name__ == '__main__':
     main()
