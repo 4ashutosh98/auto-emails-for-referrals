@@ -1,0 +1,15 @@
+Subject: Request for referral – {{ role }} @ {{ company }}
+
+Hi {{ name }},
+
+I’m reaching out because I’m applying for the {{ role }} role at {{ company }}.
+{% if personalized_note %}{{ personalized_note }}
+{% endif %}
+{% if job_link %}Role link: {{ job_link }}
+{% endif %}{% if job_id %}Job ID: {{ job_id }}
+{% endif %}
+In brief, I build reliable ML/DS systems and ship production features (portfolio: 4ashutosh98.github.io). 
+If you’re open to it, I’d be grateful for a referral, or any quick pointers to strengthen my application.
+
+Thanks so much,
+Ashutosh

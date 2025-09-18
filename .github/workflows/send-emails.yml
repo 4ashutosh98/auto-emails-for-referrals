@@ -1,0 +1,85 @@
+name: Send referral emails
+
+on:
+  schedule:
+    - cron: '0 */4 * * *' # every 4 hours (UTC)
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: send-emails
+  cancel-in-progress: false
+
+jobs:
+  run-mailer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Restore Google OAuth credentials
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
+        run: |
+          test -n "$GOOGLE_CREDENTIALS_JSON" || { echo 'Missing secret GOOGLE_CREDENTIALS_JSON'; exit 1; }
+          test -n "$GOOGLE_TOKEN_JSON" || { echo 'Missing secret GOOGLE_TOKEN_JSON'; exit 1; }
+          echo "$GOOGLE_CREDENTIALS_JSON" > credentials.json
+          echo "$GOOGLE_TOKEN_JSON" > token.json
+
+      - name: Run mailer
+        env:
+          # Non-secret variables (configure in repo Settings > Variables)
+          DRY_RUN: ${{ vars.DRY_RUN }}
+          USE_LLM: ${{ vars.USE_LLM }}
+          DAILY_LIMIT: ${{ vars.DAILY_LIMIT }}
+          SHEETS_SPREADSHEET_ID: ${{ vars.SHEETS_SPREADSHEET_ID }}
+          SHEETS_RANGE: ${{ vars.SHEETS_RANGE }}
+          SHEETS_HAS_HEADER: ${{ vars.SHEETS_HAS_HEADER }}
+          RESUME_MAP: ${{ vars.RESUME_MAP }}
+          RESUME_DEFAULT_NAME: ${{ vars.RESUME_DEFAULT_NAME }}
+          RESUME_FOLDER_ID: ${{ vars.RESUME_FOLDER_ID }}
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          GITHUB_MODELS_ENDPOINT: ${{ vars.GITHUB_MODELS_ENDPOINT }}
+          # Secrets (choose one provider; github by default)
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          AZURE_OPENAI_DEPLOYMENT: ${{ secrets.AZURE_OPENAI_DEPLOYMENT }}
+          AZURE_OPENAI_API_VERSION: ${{ vars.AZURE_OPENAI_API_VERSION }}
+          GITHUB_TOKEN: ${{ secrets.GH_MODELS_TOKEN }}
+        run: |
+          set -o pipefail
+          : "${DRY_RUN:=false}"
+          : "${USE_LLM:=true}"
+          : "${DAILY_LIMIT:=0}"
+          : "${SHEETS_RANGE:=Referrals_sheet!A:J}"
+          : "${SHEETS_HAS_HEADER:=true}"
+          : "${LLM_PROVIDER:=github}"
+          : "${LLM_MODEL:=gpt-4o-mini}"
+          : "${GITHUB_MODELS_ENDPOINT:=https://models.github.ai/inference}"
+          python main.py 2>&1 | tee mailer.log
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mailer-logs
+          path: |
+            mailer.log
+            sent_log.json
+          if-no-files-found: warn

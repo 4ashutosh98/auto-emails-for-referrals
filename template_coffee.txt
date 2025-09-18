@@ -1,0 +1,17 @@
+Subject: Quick coffee chat about {{ role }} at {{ company }}
+
+Hi {{ name | default('there') }},
+
+I came across the {{ role }} role at {{ company }} and was impressed by the work your team is doing. If you’re open to it, I’d love to buy you a virtual coffee and learn about your experience at {{ company }}—what’s exciting, how the team collaborates, and what success looks like in this role.
+
+A bit about me: I’m Ashutosh Choudhari (DS/ML/AI). {{ personalized_note | default('I enjoy building practical ML systems that ship to users.') }}
+
+If you have time for a 15–20 minute chat, I’d appreciate it. I’m exploring this role and would value your perspective. If it makes sense after we chat, I’d be grateful to discuss how best to proceed—including the referral process.
+
+{{ 'Role link: ' + job_link if job_link }}{{ '\nJob ID: ' + job_id if job_id }}
+
+Thanks for considering, and no pressure if your schedule is full.
+
+Best Regards,
+Ashutosh Choudhari
+Portfolio: 4ashutosh98.github.io

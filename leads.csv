@@ -1,0 +1,3 @@
+name	email	company	role	personalized_note	template	resume	email_sent
+Jane Doe	jane@company.com	Acme	Data Scientist	Loved your post on data quality.	cold	ds	no
+John Smith	jsmith@company.com	Acme	ML Engineer	We share interest in streaming ML.	warm	ml	no

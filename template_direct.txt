@@ -1,0 +1,17 @@
+Subject: Referral for {{ role }} at {{ company }}
+
+Hi {{ name | default('there') }},
+
+I’m applying for the {{ role }} role at {{ company }} and would be grateful if you could consider referring me. I respect your time—if you’re comfortable, a short referral would help me get in front of the team.
+
+Briefly about me: I’m Ashutosh Choudhari (DS/ML/AI). {{ personalized_note | default('I’ve built and shipped data products that improved user experience and business metrics.') }} I’m excited about {{ company }} because of the impact and the learning opportunities on the team.
+
+I’ve attached my resume for context. If there’s a form or specific process you prefer, happy to follow it.
+
+{{ 'Role link: ' + job_link if job_link }}{{ '\nJob ID: ' + job_id if job_id }}
+
+Thanks again, and I appreciate your consideration either way.
+
+Best Regards,
+Ashutosh Choudhari
+Portfolio: 4ashutosh98.github.io
