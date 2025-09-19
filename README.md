@@ -4,8 +4,8 @@
 
 1. Copy `.env.example` to `.env` and edit:
    - Set `LLM_PROVIDER=github`
-   - Paste your GitHub Personal Access Token in `GITHUB_TOKEN=` (from the account with Copilot Pro)
-   - Keep `GITHUB_MODEL=openai/gpt-4o-mini` (recommended) or choose another supported model
+   - Paste your GitHub Personal Access Token in `LLM_GITHUB_TOKEN=` (from the account with Copilot Pro)
+   - Keep `LLM_GITHUB_MODEL=openai/gpt-4o-mini` (recommended) or choose another supported model
 
 2. Install deps:
 ```bash
@@ -27,7 +27,7 @@ python main.py
 
 ## GitHub PAT for Models
 - Create a PAT: GitHub → Settings → Developer settings → Personal access tokens (classic or fine-grained)
-- Store it in your local `.env` as `GITHUB_TOKEN=...` (do not commit `.env`).
+- Store it in your local `.env` as `LLM_GITHUB_TOKEN=...` (do not commit `.env`).
 - Default endpoint is `https://models.github.ai/inference`.
 
 ## Inputs

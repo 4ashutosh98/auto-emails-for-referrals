@@ -1,5 +1,11 @@
 import base64, json, os, time, io
 import pandas as pd
+import os
+import io
+import json
+import time
+import base64
+import pandas as pd
 from jinja2 import Template
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -35,12 +41,18 @@ DAILY_LIMIT = int(os.getenv('DAILY_LIMIT', '0'))
 DRY_RUN = (os.getenv('DRY_RUN', 'false').strip().lower() in ('1','true','yes','y'))
 VERBOSE = (os.getenv('VERBOSE', 'false').strip().lower() in ('1','true','yes','y'))
 
+# Alerting configuration
+ALERT_EMAIL = os.getenv('ALERT_EMAIL', '').strip()
+ALERT_ON = os.getenv('ALERT_ON', 'error').strip().lower()  # 'error' | 'always' | 'never'
+ALERT_SUBJECT_PREFIX = os.getenv('ALERT_SUBJECT_PREFIX', '[Referrals Bot]').strip()
+
 # LLM configuration (supports OpenAI, Azure OpenAI, or GitHub Models)
 USE_LLM = (os.getenv('USE_LLM', 'true').strip().lower() in ('1','true','yes','y'))
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "github").lower()  # openai|azure|github
+USE_SENT_LOG = (os.getenv('USE_SENT_LOG', 'false').strip().lower() in ('1','true','yes','y'))
 
 if LLM_PROVIDER == 'github':
-    LLM_MODEL = os.getenv("GITHUB_MODEL", "gpt-4o-mini")
+    LLM_MODEL = os.getenv("LLM_GITHUB_MODEL", "gpt-4o-mini")
 elif LLM_PROVIDER == 'azure':
     LLM_MODEL = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-o4-mini")
 
@@ -62,10 +74,10 @@ AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 
 # GitHub Models (models.github.ai)
 # Required envs when LLM_PROVIDER=github:
-#   GITHUB_TOKEN=ghp_...
+#   LLM_GITHUB_TOKEN=ghp_...
 # Optionally override base url or model via envs.
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-GITHUB_MODELS_ENDPOINT = os.getenv("GITHUB_MODELS_ENDPOINT", "https://models.github.ai/inference")
+LLM_GITHUB_TOKEN = os.getenv("LLM_GITHUB_TOKEN")
+LLM_GITHUB_MODELS_ENDPOINT = os.getenv("LLM_GITHUB_MODELS_ENDPOINT", "https://models.github.ai/inference")
 
 def get_llm_client_and_model():
     """Return (client, model_name) for the selected provider using OpenAI SDK."""
@@ -89,26 +101,83 @@ def get_llm_client_and_model():
         model_name = AZURE_OPENAI_DEPLOYMENT
         return client, model_name
     elif provider == "github":
-        if not GITHUB_TOKEN:
-            raise RuntimeError("GITHUB_TOKEN not set; cannot use GitHub Models provider")
-        client = OpenAI(base_url=GITHUB_MODELS_ENDPOINT, api_key=GITHUB_TOKEN)
+        if not LLM_GITHUB_TOKEN:
+            raise RuntimeError("LLM_GITHUB_TOKEN not set; cannot use GitHub Models provider")
+        client = OpenAI(base_url=LLM_GITHUB_MODELS_ENDPOINT, api_key=LLM_GITHUB_TOKEN)
         # Example model: "openai/gpt-4o-mini"
-        model_name = os.getenv("GITHUB_MODEL", LLM_MODEL if "/" in LLM_MODEL else f"openai/{LLM_MODEL}")
+        model_name = os.getenv("LLM_GITHUB_MODEL", LLM_MODEL if "/" in LLM_MODEL else f"openai/{LLM_MODEL}")
         return client, model_name
     else:
         raise RuntimeError(f"Unsupported LLM_PROVIDER: {provider}")
 
-# Lightweight logging helpers
+# Lightweight logging helpers with capture for alerting
+RUN_LOG: list[dict] = []
+ERROR_COUNT = 0
+
+def _log_event(level: str, msg: str):
+    ts = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    RUN_LOG.append({
+        'ts': ts,
+        'level': level.upper(),
+        'msg': msg,
+    })
+
 def _log(msg: str):
     if VERBOSE:
         print(msg)
+    _log_event('info', msg)
 
 def _warn(msg: str):
     if VERBOSE:
         print(f"WARN: {msg}")
+    _log_event('warn', msg)
 
 def _error(msg: str):
+    global ERROR_COUNT
+    ERROR_COUNT += 1
     print(f"ERROR: {msg}")
+    _log_event('error', msg)
+
+def _render_run_log_text() -> str:
+    lines = []
+    for e in RUN_LOG:
+        lines.append(f"{e['ts']} [{e['level']}] {e['msg']}")
+    return "\n".join(lines)
+
+def _should_send_alert() -> bool:
+    if not ALERT_EMAIL or ALERT_ON == 'never':
+        return False
+    if ALERT_ON == 'always':
+        return True
+    # default: error
+    return ERROR_COUNT > 0
+
+def send_alert_email(service, subject_suffix: str = ''):
+    if not _should_send_alert():
+        return
+    try:
+        subject = f"{ALERT_SUBJECT_PREFIX} Run {'errors' if ERROR_COUNT>0 else 'report'}{(' - ' + subject_suffix) if subject_suffix else ''}"
+        summary = f"Run summary: errors={ERROR_COUNT}, entries={len(RUN_LOG)}.\nTime: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}\n\n"
+        body = summary + _render_run_log_text()
+        attachment = {
+            'bytes': body.encode('utf-8'),
+            'filename': 'run.log.txt',
+            'mimeType': 'text/plain'
+        }
+        msg = create_message_with_attachment(
+            ALERT_EMAIL,
+            subject,
+            body,
+            attachment=attachment,
+            headers={
+                'X-Referrals-Bot': '1',
+                'X-Referrals-Alert': '1'
+            }
+        )
+        send_message(service, 'me', msg)
+    except Exception as e:
+        # Last resort: just print
+        print(f"ERROR: failed to send alert email to {ALERT_EMAIL}: {e}")
 
 # Optional resume attachment (can be overridden via env)
 RESUME_PATH = os.getenv('RESUME_PATH', "Ashutosh_Choudhari_Resume.pdf")
@@ -264,6 +333,29 @@ def _num_to_col(n: int) -> str:
         n -= 1
     return s
 
+def _col_to_num(col: str) -> int:
+    # 'A'->0, 'Z'->25, 'AA'->26
+    col = (col or '').strip().upper()
+    if not col:
+        return 0
+    num = 0
+    for ch in col:
+        if 'A' <= ch <= 'Z':
+            num = num * 26 + (ord(ch) - 64)
+    return max(0, num - 1)
+
+def _a1_start_col_index(rng: str) -> int:
+    # Extract the starting column index from an A1 range like 'Sheet!B2:K' or 'A:J'
+    if '!' in rng:
+        a1 = rng.split('!', 1)[1]
+    else:
+        a1 = rng
+    start = a1.split(':', 1)[0]
+    letters = ''.join([c for c in start if c.isalpha()])
+    if not letters:
+        return 0
+    return _col_to_num(letters)
+
 def mark_sheet_row_sent(spreadsheet_id: str, row_number: int, status_value: str = 'SENT'):
     if not spreadsheet_id or not row_number:
         return
@@ -282,8 +374,10 @@ def mark_sheet_row_sent(spreadsheet_id: str, row_number: int, status_value: str 
         status_idx = _col_index_by_name(headers_norm, 'email_sent')
     sent_at_idx = _col_index_by_name(headers_norm, 'sent_at')
 
-    status_col = status_col_override or (_num_to_col(status_idx) if status_idx is not None else None)
-    sent_at_col = sent_at_col_override or (_num_to_col(sent_at_idx) if sent_at_idx is not None else None)
+    # Adjust for range offset (if SHEETS_RANGE does not start at column A)
+    start_offset = _a1_start_col_index(rng)
+    status_col = status_col_override or (_num_to_col(start_offset + status_idx) if status_idx is not None else None)
+    sent_at_col = sent_at_col_override or (_num_to_col(start_offset + sent_at_idx) if sent_at_idx is not None else None)
 
     if not status_col and not sent_at_col:
         # Nothing to write back
@@ -304,20 +398,36 @@ def mark_sheet_row_sent(spreadsheet_id: str, row_number: int, status_value: str 
 
 def load_template(kind):
     path = TEMPLATES.get((kind or 'cold').lower(), TEMPLATES['cold'])
-    with open(path, 'r', encoding='utf-8') as f:
-        return Template(f.read())
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return Template(f.read())
+    except Exception:
+        # Fallback to cold template if requested template not found
+        fallback = TEMPLATES['cold']
+        with open(fallback, 'r', encoding='utf-8') as f:
+            return Template(f.read())
 
 def load_template_text(kind):
     """Load the raw text of a template for style inspiration (no Jinja rendering)."""
     path = TEMPLATES.get((kind or 'cold').lower(), TEMPLATES['cold'])
-    with open(path, 'r', encoding='utf-8') as f:
-        return f.read()
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception:
+        with open(TEMPLATES['cold'], 'r', encoding='utf-8') as f:
+            return f.read()
 
-def create_message_with_attachment(to, subject, body, attachment=None, attachment_path=None):
+def create_message_with_attachment(to, subject, body, attachment=None, attachment_path=None, headers: dict | None = None):
     # Multipart message with optional PDF attachment
     msg = MIMEMultipart()
     msg['To'] = to
     msg['Subject'] = subject
+    if headers:
+        for k, v in headers.items():
+            try:
+                msg[k] = v
+            except Exception:
+                pass
 
     msg.attach(MIMEText(body, 'plain', 'utf-8'))
 
@@ -557,16 +667,29 @@ def main():
     df = load_contacts_df()
     service = get_service()
     drive_service = get_drive_service()
-    sent_log = load_sent_log()
+    sent_log = load_sent_log() if USE_SENT_LOG else {}
     spreadsheet_id = os.getenv('SHEETS_SPREADSHEET_ID', '').strip()
+
+    # Ensure the sheet within SHEETS_RANGE includes a status column; otherwise abort to prevent duplicate sends
+    if spreadsheet_id:
+        headers_norm = _get_sheet_headers(spreadsheet_id)
+        if headers_norm:
+            status_idx = _col_index_by_name(headers_norm, 'status')
+            if status_idx is None:
+                status_idx = _col_index_by_name(headers_norm, 'email_sent')
+            if status_idx is None:
+                rng = os.getenv('SHEETS_RANGE', 'Contacts!A:F')
+                _error(f"No 'status' or 'email_sent' column found in the first row of SHEETS_RANGE='{rng}'. Update the range to include a status column and try again.")
+                send_alert_email(service, subject_suffix='missing status column')
+                return
 
     sent_count = 0
     for _, row in df.iterrows():
-        name = row['name'].strip()
-        email = row['email'].strip()
-        company = row['company'].strip()
-        role = row['role'].strip()
-        note = row['personalized_note'].strip()
+        name = (row.get('name') or '').strip()
+        email = (row.get('email') or '').strip()
+        company = (row.get('company') or '').strip()
+        role = (row.get('role') or '').strip()
+        note = (row.get('personalized_note') or '').strip()
         job_link = (row.get('job_link') or '').strip()
         job_id = (row.get('job_id') or '').strip()
         template_kind = (row.get('template', 'cold') or 'cold').lower()
@@ -610,7 +733,7 @@ def main():
                 except Exception as e:
                     _error(f'failed to clear status for sheet row {sheet_row}: {e}')
 
-        if already_sent(sent_log, name, email, role, company):
+        if USE_SENT_LOG and already_sent(sent_log, name, email, role, company):
             _log(f'SKIP already sent -> {email} ({role} @ {company})')
             continue
 
@@ -632,7 +755,7 @@ def main():
                 else:
                     inspiration = 'warm' if (note and note.strip()) else 'cold'
                 intent = 'coffee' if inspiration == 'coffee' else ('direct' if inspiration == 'direct' else None)
-                _log(f"LLM mode -> provider={LLM_PROVIDER}, model={LLM_MODEL or os.getenv('GITHUB_MODEL','')}; style inspiration={inspiration}; intent={intent or 'auto'}")
+                _log(f"LLM mode -> provider={LLM_PROVIDER}, model={LLM_MODEL or os.getenv('LLM_GITHUB_MODEL','')}; style inspiration={inspiration}; intent={intent or 'auto'}")
                 subject, body = generate_email_with_llm(row_dict, inspiration_kind=inspiration, intent=intent)
             except Exception as e:
                 _error(f"LLM error for {email}: {e} -> falling back to template '{template_kind}'")
@@ -672,7 +795,8 @@ def main():
             att_info = f"yes ({attachment.get('filename')})" if attachment else (f"yes ({Path(RESUME_PATH).name})" if Path(RESUME_PATH).exists() else 'no')
             if VERBOSE:
                 print(f'-- DRY RUN -- To: {email}\nSubject: {subject}\n{body}\n(attached: {att_info})\n---')
-            mark_sent(sent_log, name, email, role, company, 'DRY_RUN')
+            if USE_SENT_LOG:
+                mark_sent(sent_log, name, email, role, company, 'DRY_RUN')
             if spreadsheet_id and sheet_row:
                 try:
                     mark_sheet_row_sent(spreadsheet_id, sheet_row, status_value='DRY_RUN')
@@ -684,10 +808,12 @@ def main():
             message = create_message_with_attachment(email, subject, body, attachment=attachment, attachment_path=None)
             resp = send_message(service, 'me', message)
             msg_id = resp.get('id', 'UNKNOWN')
-            mark_sent(sent_log, name, email, role, company, msg_id)
+            if USE_SENT_LOG:
+                mark_sent(sent_log, name, email, role, company, msg_id)
             sent_count += 1
             _log(f'SENT -> {email} (id={msg_id})')
-            save_sent_log(sent_log)
+            if USE_SENT_LOG:
+                save_sent_log(sent_log)
             if spreadsheet_id and sheet_row:
                 try:
                     mark_sheet_row_sent(spreadsheet_id, sheet_row, status_value='SENT')
@@ -697,8 +823,11 @@ def main():
         except Exception as e:
             _error(f'ERROR sending to {email}: {e}')
 
-    save_sent_log(sent_log)
+    if USE_SENT_LOG:
+        save_sent_log(sent_log)
     _log(f'Done. Sent {sent_count}.')
+    # Send alert/report if configured
+    send_alert_email(service)
 
 if __name__ == '__main__':
     main()

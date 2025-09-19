@@ -55,14 +55,14 @@ jobs:
           RESUME_FOLDER_ID: ${{ vars.RESUME_FOLDER_ID }}
           LLM_PROVIDER: ${{ vars.LLM_PROVIDER }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
-          GITHUB_MODELS_ENDPOINT: ${{ vars.GITHUB_MODELS_ENDPOINT }}
+          LLM_GITHUB_MODELS_ENDPOINT: ${{ vars.LLM_GITHUB_MODELS_ENDPOINT }}
           # Secrets (choose one provider; github by default)
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
           AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
           AZURE_OPENAI_DEPLOYMENT: ${{ secrets.AZURE_OPENAI_DEPLOYMENT }}
           AZURE_OPENAI_API_VERSION: ${{ vars.AZURE_OPENAI_API_VERSION }}
-          GITHUB_TOKEN: ${{ secrets.GH_MODELS_TOKEN }}
+          LLM_GITHUB_TOKEN: ${{ secrets.LLM_GITHUB_TOKEN }}
         run: |
           set -o pipefail
           : "${DRY_RUN:=false}"
@@ -72,7 +72,7 @@ jobs:
           : "${SHEETS_HAS_HEADER:=true}"
           : "${LLM_PROVIDER:=github}"
           : "${LLM_MODEL:=gpt-4o-mini}"
-          : "${GITHUB_MODELS_ENDPOINT:=https://models.github.ai/inference}"
+          : "${LLM_GITHUB_MODELS_ENDPOINT:=https://models.github.ai/inference}"
           # Run and capture output; decide later whether to persist logs
           set +e
           python main.py > run.out 2>&1
