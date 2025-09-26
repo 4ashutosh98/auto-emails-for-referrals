@@ -6,6 +6,7 @@ import json
 import time
 import base64
 import pandas as pd
+import sys
 from jinja2 import Template
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -45,6 +46,7 @@ VERBOSE = (os.getenv('VERBOSE', 'false').strip().lower() in ('1','true','yes','y
 ALERT_EMAIL = os.getenv('ALERT_EMAIL', '').strip()
 ALERT_ON = os.getenv('ALERT_ON', 'error').strip().lower()  # 'error' | 'always' | 'never'
 ALERT_SUBJECT_PREFIX = os.getenv('ALERT_SUBJECT_PREFIX', '[Referrals Bot]').strip()
+REFRESH_DEBUG = (os.getenv('GOOGLE_REFRESH_DEBUG', 'false').strip().lower() in ('1','true','yes','y'))
 
 # LLM configuration (supports OpenAI, Azure OpenAI, or GitHub Models)
 USE_LLM = (os.getenv('USE_LLM', 'true').strip().lower() in ('1','true','yes','y'))
@@ -182,6 +184,51 @@ def send_alert_email(service, subject_suffix: str = ''):
 # Optional resume attachment (can be overridden via env)
 RESUME_PATH = os.getenv('RESUME_PATH', "Ashutosh_Choudhari_Resume.pdf")
 
+def preflight_validate_credentials():
+    """Lightweight validations to fail fast in CI or local precheck.
+    Checks:
+      - credentials.json exists & loads
+      - token.json exists & loads (unless interactive allowed)
+      - Required scopes present in token (best-effort)
+      - Gmail send capability (metadata) reachable with existing token (optional best-effort)
+    Raises RuntimeError on critical issues.
+    """
+    missing = []
+    if not os.path.exists('credentials.json'):
+        missing.append('credentials.json')
+    if not os.path.exists('token.json'):
+        # In local interactive mode we could allow creation, but for precheck treat as required
+        missing.append('token.json')
+    if missing:
+        raise RuntimeError(f"Missing credential file(s): {', '.join(missing)}")
+    # Basic JSON load validation
+    try:
+        with open('credentials.json','r',encoding='utf-8') as f:
+            creds_doc = json.load(f)
+    except Exception as e:
+        raise RuntimeError(f'credentials.json invalid JSON: {e}')
+    try:
+        with open('token.json','r',encoding='utf-8') as f:
+            token_doc = json.load(f)
+    except Exception as e:
+        raise RuntimeError(f'token.json invalid JSON: {e}')
+
+    # Scope sanity (best-effort: token file often has 'scopes')
+    needed_scopes = set(SCOPES)
+    token_scopes = set(token_doc.get('scopes', []) or token_doc.get('scope', '').split())
+    missing_scopes = needed_scopes - token_scopes if token_scopes else set()
+    if missing_scopes:
+        raise RuntimeError(f'token.json missing required scopes: {missing_scopes}')
+
+    # Best-effort Gmail profile fetch to ensure token isn't revoked
+    try:
+        svc = get_service()
+        svc.users().getProfile(userId='me').execute()
+    except Exception as e:
+        raise RuntimeError(f'Gmail profile check failed (token may be revoked/insufficient scopes): {e}')
+
+    return True
+
 def get_service():
     creds = None
     if os.path.exists('token.json'):
@@ -189,10 +236,19 @@ def get_service():
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             try:
+                if REFRESH_DEBUG:
+                    _log('Attempting Gmail token refresh...')
                 creds.refresh(Request())  # type: ignore
-            except Exception:
+                if REFRESH_DEBUG:
+                    _log('Gmail token refresh succeeded.')
+            except Exception as e:
+                if REFRESH_DEBUG:
+                    _error(f'Gmail token refresh failed: {e}')
                 pass
         if not creds or not creds.valid:
+            # In CI (no browser), abort with clear message instead of launching local server
+            if os.getenv('CI') or os.getenv('GITHUB_ACTIONS'):
+                raise RuntimeError("Google OAuth token.json missing or invalid in CI. Generate it locally (with required scopes) and store its full JSON in the secret GOOGLE_TOKEN_JSON. The workflow step must write it to token.json before running main.py.")
             flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
             creds = flow.run_local_server(port=0)
         with open('token.json', 'w') as token:
@@ -207,10 +263,18 @@ def get_drive_service():
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             try:
+                if REFRESH_DEBUG:
+                    _log('Attempting Drive token refresh...')
                 creds.refresh(Request())  # type: ignore
-            except Exception:
+                if REFRESH_DEBUG:
+                    _log('Drive token refresh succeeded.')
+            except Exception as e:
+                if REFRESH_DEBUG:
+                    _error(f'Drive token refresh failed: {e}')
                 pass
         if not creds or not creds.valid:
+            if os.getenv('CI') or os.getenv('GITHUB_ACTIONS'):
+                raise RuntimeError("Google OAuth token.json missing or invalid in CI (drive service). Provide token.json via secret as above; do not rely on interactive OAuth in Actions.")
             flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
             creds = flow.run_local_server(port=0)
         with open('token.json', 'w') as token:
@@ -225,10 +289,18 @@ def get_sheets_service():
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             try:
+                if REFRESH_DEBUG:
+                    _log('Attempting Sheets token refresh...')
                 creds.refresh(Request())  # type: ignore
-            except Exception:
+                if REFRESH_DEBUG:
+                    _log('Sheets token refresh succeeded.')
+            except Exception as e:
+                if REFRESH_DEBUG:
+                    _error(f'Sheets token refresh failed: {e}')
                 pass
         if not creds or not creds.valid:
+            if os.getenv('CI') or os.getenv('GITHUB_ACTIONS'):
+                raise RuntimeError("Google OAuth token.json missing or invalid in CI (sheets service). Ensure token.json is written from secret before execution.")
             flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
             creds = flow.run_local_server(port=0)
         with open('token.json', 'w') as token:
@@ -664,6 +736,14 @@ Return JSON only."""
         return subject, body
 
 def main():
+    # Optional pre-flight check when PRECHECK=true
+    if os.getenv('PRECHECK', '').strip().lower() in ('1','true','yes','y'):
+        try:
+            preflight_validate_credentials()
+        except Exception as e:
+            _error(f'Pre-flight validation failed: {e}')
+            send_alert_email(get_service(), subject_suffix='precheck failure')
+            return
     df = load_contacts_df()
     service = get_service()
     drive_service = get_drive_service()
@@ -830,4 +910,13 @@ def main():
     send_alert_email(service)
 
 if __name__ == '__main__':
-    main()
+    # Support a CLI pre-check mode: python main.py --precheck
+    if len(sys.argv) > 1 and sys.argv[1] == '--precheck':
+        try:
+            preflight_validate_credentials()
+            print('Pre-flight credentials validation OK.')
+        except Exception as e:
+            print(f'Pre-flight credentials validation FAILED: {e}')
+            sys.exit(1)
+    else:
+        main()
