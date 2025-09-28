@@ -4,8 +4,6 @@ import sys
 import time
 from typing import Optional
 
-import pandas as pd
-
 from .alerts import send_alert_email
 from .config import AppConfig, CONFIG
 from . import data_sources, emailer, google_clients, llm, log_utils, storage, templates
@@ -51,6 +49,12 @@ def execute_mailer(config: AppConfig = CONFIG) -> None:
 
     sent_count = 0
 
+    def describe_contact() -> str:
+        safe_name = name or "(no name)"
+        safe_role = role or "(no role)"
+        safe_company = company or "(no company)"
+        return f"{safe_name} ({safe_role} @ {safe_company})"
+
     for _, row in contacts_df.iterrows():
         name = (row.get("name") or "").strip()
         email = (row.get("email") or "").strip()
@@ -64,15 +68,17 @@ def execute_mailer(config: AppConfig = CONFIG) -> None:
 
         raw_status = (row.get("status") or row.get("email_sent") or "").strip()
         status_val = raw_status.upper()
+        contact_label = describe_contact()
+
         if status_val in {"SENT", "YES", "TRUE", "1", "DONE"}:
             log_utils.log_info(
-                f"SKIP (sheet marked SENT) -> {email} ({role} @ {company})",
+                f"SKIP (sheet marked SENT) -> {contact_label}",
                 verbose=config.verbose,
             )
             continue
         if status_val == "REQUIRED_FIELD_MISSING":
             log_utils.log_info(
-                f"Revalidating previously incomplete row -> {email} ({role} @ {company})",
+                f"Revalidating previously incomplete row -> {contact_label}",
                 verbose=config.verbose,
             )
 
@@ -93,7 +99,7 @@ def execute_mailer(config: AppConfig = CONFIG) -> None:
 
         if missing_fields:
             log_utils.log_info(
-                f"REQUIRED FIELD MISSING {missing_fields} -> {email or '(no email)'} ({role or '(no role)'} @ {company or '(no company)'})",
+                f"REQUIRED FIELD MISSING {missing_fields} -> {contact_label}",
                 verbose=config.verbose,
             )
             if spreadsheet_id and sheet_row and sheets_service is not None:
@@ -110,7 +116,7 @@ def execute_mailer(config: AppConfig = CONFIG) -> None:
                     log_utils.log_error(f"Failed to clear status for sheet row {sheet_row}: {exc}")
 
         if config.use_sent_log and storage.already_sent(sent_log, name, email, role, company):
-            log_utils.log_info(f"SKIP already sent -> {email} ({role} @ {company})", verbose=config.verbose)
+            log_utils.log_info(f"SKIP already sent -> {contact_label}", verbose=config.verbose)
             continue
 
         if config.daily_limit > 0 and sent_count >= config.daily_limit:
@@ -139,7 +145,7 @@ def execute_mailer(config: AppConfig = CONFIG) -> None:
                 )
                 subject, body = llm.generate_email_with_llm(config, row_dict, inspiration_kind=inspiration, intent=intent)
             except Exception as exc:
-                log_utils.log_error(f"LLM error for {email}: {exc}; falling back to template '{template_kind}'")
+                log_utils.log_error(f"LLM error for {contact_label}: {exc}; falling back to template '{template_kind}'")
                 tmpl = templates.load_template(config, template_kind)
                 rendered = tmpl.render(name=name, company=company, role=role, personalized_note=note, job_link=job_link, job_id=job_id)
                 subject, body = _split_subject(rendered)
@@ -163,7 +169,7 @@ def execute_mailer(config: AppConfig = CONFIG) -> None:
             elif config.resume.local_path.exists():
                 attachment_info = f"yes ({config.resume.local_path.name})"
             if config.verbose:
-                print(f"-- DRY RUN -- To: {email}\nSubject: {subject}\n{body}\n(attached: {attachment_info})\n---")
+                print(f"-- DRY RUN -- To: {contact_label}\nSubject: {subject}\n{body}\n(attached: {attachment_info})\n---")
             if config.use_sent_log:
                 storage.mark_sent(sent_log, name, email, role, company, "DRY_RUN")
             if spreadsheet_id and sheet_row and sheets_service is not None:
@@ -181,7 +187,7 @@ def execute_mailer(config: AppConfig = CONFIG) -> None:
             if config.use_sent_log:
                 storage.mark_sent(sent_log, name, email, role, company, message_id)
             sent_count += 1
-            log_utils.log_info(f"SENT -> {email} (id={message_id})", verbose=config.verbose)
+            log_utils.log_info(f"SENT -> {contact_label} (id={message_id})", verbose=config.verbose)
             if config.use_sent_log:
                 storage.save_sent_log(sent_log)
             if spreadsheet_id and sheet_row and sheets_service is not None:
@@ -191,7 +197,7 @@ def execute_mailer(config: AppConfig = CONFIG) -> None:
                     log_utils.log_error(f"Failed to mark sheet row {sheet_row}: {exc}")
             time.sleep(1.5)
         except Exception as exc:
-            log_utils.log_error(f"ERROR sending to {email}: {exc}")
+            log_utils.log_error(f"ERROR sending to {contact_label}: {exc}")
 
     if config.use_sent_log:
         storage.save_sent_log(sent_log)
