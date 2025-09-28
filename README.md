@@ -3,12 +3,46 @@
 Send tailored referral emails at scale using Google Sheets (or CSV), Gmail, Drive (for resumes), and an optional LLM to draft high-quality messages.
 
 This repo includes:
-- A Python mailer (`main.py`) with Google APIs and an LLM abstraction (GitHub Models, OpenAI, or Azure OpenAI)
+- A modular Python mailer (`referrals/` package) with Google APIs and an LLM abstraction (GitHub Models, OpenAI, or Azure OpenAI) exposed through `main.py`
 - Jinja templates for cold, warm, coffee chat, and direct referral styles
 - A robust Google Sheets workflow with write-back status and timestamps
 - GitHub Actions automation (scheduled every 4 hours) and a failure tracker
 
 ---
+
+## Project structure & key modules
+
+```
+auto-emails-for-referrals/
+├── main.py                      # Thin CLI entrypoint calling referrals.run.main()
+├── leads.csv                    # Sample CSV fallback for contacts
+├── template_cold.txt            # Jinja templates used by referrals.templates
+├── template_warm.txt
+├── template_coffee.txt
+├── template_direct.txt
+├── requirements.txt             # Python dependencies
+└── referrals/
+   ├── __init__.py             # Re-exports CONFIG, AppConfig, execute_mailer, run_precheck
+   ├── config.py               # Dataclasses & loaders for env-driven settings (LLM, sheets, resumes, alerts, flags)
+   ├── log_utils.py            # Structured run log buffering, pretty text rendering, alert decision helpers
+   ├── alerts.py               # Builds & sends post-run summaries via Gmail with the captured log attached
+   ├── google_clients.py       # OAuth preflight validation and authenticated Gmail/Drive/Sheets service factories
+   ├── templates.py            # Jinja environment, plain-text loaders, and fallback logic for email templates
+   ├── llm.py                  # Provider-agnostic wrapper around GitHub Models, OpenAI, or Azure OpenAI completions
+   ├── data_sources.py         # Google Sheets + CSV ingestion, header normalization, status write-back utilities
+   ├── emailer.py              # MIME assembly, attachment resolution, Gmail send wrapper
+   ├── storage.py              # Local `sent_log.json` persistence and dedupe helpers
+   └── run.py                  # High-level orchestration for --precheck and live send workflows
+```
+
+The `run.py` module is the conductor: it loads configuration (`config.CONFIG`), pulls contacts from the right source, chooses between templates or the LLM, manages attachments, and records outcomes. Alerting, logging, and credential validation are handled through composed helpers to keep each concern isolated. If you need to script custom behavior, you can import from `referrals` directly:
+
+```python
+from referrals import CONFIG, execute_mailer, run_precheck
+
+run_precheck(CONFIG)
+execute_mailer(CONFIG)
+```
 
 ## What you’ll need
 
@@ -45,7 +79,7 @@ cp .env.example .env
 # Open .env and fill in values; see sections below for details.
 ```
 
-Key env groups used by `main.py`:
+Key env groups consumed by the runtime (see `referrals.config` for defaults and parsing rules):
 - Core flags: `DRY_RUN`, `VERBOSE`, `USE_LLM`, `DAILY_LIMIT`, `USE_SENT_LOG`
 - LLM provider: `LLM_PROVIDER` (github|openai|azure), `LLM_MODEL`
 - GitHub Models: `LLM_GITHUB_TOKEN`, `LLM_GITHUB_MODEL`, `LLM_GITHUB_MODELS_ENDPOINT`
@@ -68,7 +102,7 @@ Then create OAuth 2.0 credentials:
 - Download as `credentials.json`
 - Place `credentials.json` in the repo root (same folder as `main.py`)
 
-First run will create `token.json` after you approve consent.
+First run will create `token.json` after you approve consent. Every subsequent run uses the cached token; the `referrals.google_clients` module refreshes tokens automatically and surfaces actionable errors in the run log.
 
 4) First run (OAuth consent)
 
@@ -87,7 +121,7 @@ Before sending, validate your credentials and scopes:
 python main.py --precheck
 ```
 
-This checks that `credentials.json` and `token.json` exist, scopes are present, and Gmail profile is reachable.
+This calls `referrals.run.run_precheck`, which verifies that `credentials.json` and `token.json` exist, scopes are present, and Gmail profile access succeeds. The same preflight is also used by GitHub Actions and the `token-health-check.yml` workflow.
 
 6) Send a test
 
@@ -100,7 +134,7 @@ python main.py
 
 ## Data sources: Google Sheets (recommended) or CSV
 
-By default, the app reads from Google Sheets when `SHEETS_SPREADSHEET_ID` is set; otherwise it falls back to `leads.csv`.
+By default, the app reads from Google Sheets when `SHEETS_SPREADSHEET_ID` is set; otherwise `referrals.data_sources` falls back to `leads.csv`.
 
 ### Google Sheets
 
@@ -120,7 +154,7 @@ Important:
 - Missing required fields are marked `required_field_missing`. Fix the row later and it will be revalidated and processed.
 - Rows already marked as `SENT`, `YES`, `TRUE`, `1`, or `DONE` are skipped.
 
-Synonyms handled automatically:
+Synonyms handled automatically by `referrals.data_sources`:
 - `personalized_no` → `personalized_note`
 - `personalizednote` → `personalized_note`
 - `resume` → `resume_flag`
@@ -151,7 +185,7 @@ In your data source, set the `template` column to one of:
 - `llm` → LLM drafts the email; it will heuristically use `warm` style if there’s a `personalized_note`, else `cold`
 - `llm-warm` / `llm-cold` / `llm-coffee` / `llm-direct` → LLM drafts with that style inspiration and intent
 
-LLM output contract:
+LLM output contract (implemented in `referrals.llm`):
 - The assistant is instructed to return JSON with keys: `subject` and `body`
 - If parsing fails, the first line is treated as subject and the rest as body
 
@@ -159,7 +193,7 @@ LLM output contract:
 
 Set `LLM_PROVIDER` to `github`, `openai`, or `azure`.
 
-GitHub Models (default):
+GitHub Models (default in `config.py`):
 - Set `LLM_GITHUB_TOKEN` to a PAT from the account with Copilot access
 - Default endpoint: `LLM_GITHUB_MODELS_ENDPOINT=https://models.github.ai/inference`
 - Model name: `LLM_GITHUB_MODEL=openai/gpt-4o-mini` is a good start
@@ -178,7 +212,7 @@ Azure OpenAI:
 
 Attach a PDF resume based on the `resume_flag` column in your data.
 
-Options (can be combined):
+Options (handled in `referrals.emailer.get_resume_attachment`, can be combined):
 - Map flags to Drive file IDs with `RESUME_MAP` (JSON or `flag:fileId` pairs)
 - Use names instead of IDs by prefixing with `name:`; e.g., `ai:name:Ashutosh Choudhari Resume for AI.pdf`
 - Constrain searches to a folder with `RESUME_FOLDER_ID`
@@ -189,7 +223,7 @@ Options (can be combined):
 
 ## Alerts and observability
 
-Set an alert email to receive a run summary and the captured log as an attachment:
+Set an alert email to receive a run summary and the captured log as an attachment (powered by `referrals.alerts.send_alert_email` and `log_utils.render_run_log_text`):
 - `ALERT_EMAIL=you@example.com`
 - `ALERT_ON=error|always|never` (default: `error`)
 - `ALERT_SUBJECT_PREFIX` (default: `[Referrals Bot]`)
@@ -202,9 +236,9 @@ Additional logs:
 
 ## Safety, deduplication, and limits
 
-- The Google Sheet status column is the source of truth. Already sent rows are skipped.
-- Local `sent_log.json` can be enabled with `USE_SENT_LOG=true` (name+role+company key; avoids storing emails).
-- Limit daily sends with `DAILY_LIMIT` (0 = unlimited).
+- The Google Sheet status column is the source of truth. Already sent rows are skipped. Header discovery and write-back logic live in `referrals.data_sources`.
+- Local `sent_log.json` can be enabled with `USE_SENT_LOG=true` (name+role+company key; avoids storing emails). Persistence helpers live in `referrals.storage`.
+- Limit daily sends with `DAILY_LIMIT` (0 = unlimited). Enforcement happens in `referrals.run.execute_mailer`.
 
 Sensitive files are ignored by `.gitignore`: `.env`, `credentials.json`, `token.json`, `sent_log.json`.
 
@@ -212,7 +246,7 @@ Sensitive files are ignored by `.gitignore`: `.env`, `credentials.json`, `token.
 
 ## Automation with GitHub Actions (optional)
 
-This repo includes two workflows under `.github/workflows/`:
+This repo includes three workflows under `.github/workflows/`:
 
 1) `send-emails.yml` — runs every 4 hours and on manual dispatch.
     - Required repository secrets: `GOOGLE_CREDENTIALS_JSON`, `GOOGLE_TOKEN_JSON`
@@ -226,14 +260,14 @@ This repo includes two workflows under `.github/workflows/`:
        - `RESUME_MAP`, `RESUME_DEFAULT_NAME`, `RESUME_FOLDER_ID`
        - `LLM_PROVIDER`, `LLM_MODEL`, `LLM_GITHUB_MODELS_ENDPOINT`
        - `AZURE_OPENAI_API_VERSION` (if using Azure)
-    - The job restores `credentials.json` and `token.json` from secrets and runs `python main.py`.
+   - The job restores `credentials.json` and `token.json` from secrets and runs `python main.py` (which delegates into `referrals.run.main`).
     - On verbose or failure, logs are uploaded as an artifact named `mailer-logs`.
 
 2) `notify-failure.yml` — creates/updates a single tracker issue when the mailer fails.
    - Adds log snippets, tracks a failure streak, and auto-closes when the next run succeeds.
 
 3) `token-health-check.yml` — runs daily (and on demand) to ensure the encrypted Google token still works.
-   - Restores `credentials.json`/`token.json`, runs `python main.py --precheck`, and uploads the log.
+   - Restores `credentials.json`/`token.json`, runs `python main.py --precheck`, and uploads the log rendered by `referrals.log_utils`.
    - If credentials are missing or precheck fails, it opens/updates an issue labeled `token-refresh-required` with a nicely formatted action plan (GitHub emails you the issue).
    - When the check passes again, it comments on and auto-closes the alert issue.
 
@@ -315,11 +349,11 @@ python main.py --precheck
 
 ## How it works (high-level)
 
-1) Load env and data (Sheets or CSV), normalize headers.
-2) Enforce required fields and skip already-sent rows based on the sheet status.
-3) Render email with either a Jinja template or an LLM (with optional style inspiration and intent).
-4) Attach a resume selected via Drive ID/name mapping or local fallback.
-5) Send via Gmail API, write back `SENT` (and `sent_at`) to the Sheet, and optionally update `sent_log.json`.
-6) On completion, optionally email a run summary to `ALERT_EMAIL` with the full run log attached.
+1) `referrals.config.load_config()` snapshots env vars into typed dataclasses.
+2) `referrals.data_sources.load_contacts_df()` pulls Sheets or CSV data, normalizes headers, and tracks sheet rows for write-back.
+3) `referrals.run.execute_mailer()` enforces required fields, daily limits, dedupe, and skips already-sent rows.
+4) `referrals.templates` or `referrals.llm` produces personalized subject/body text, depending on the `template` value.
+5) `referrals.emailer` resolves Drive/local resume attachments and sends via the Gmail API client from `referrals.google_clients`.
+6) `referrals.data_sources.mark_sheet_row_sent()` records status/timestamps, `referrals.storage` updates the optional local log, and `referrals.alerts` sends a summarized run recap with the structured log rendered by `log_utils`.
 
 That’s it—happy (and considerate) outreach!
