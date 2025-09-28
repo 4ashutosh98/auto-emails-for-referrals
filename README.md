@@ -230,13 +230,16 @@ This repo includes two workflows under `.github/workflows/`:
     - On verbose or failure, logs are uploaded as an artifact named `mailer-logs`.
 
 2) `notify-failure.yml` — creates/updates a single tracker issue when the mailer fails.
-    - Adds log snippets, tracks a failure streak, and auto-closes when the next run succeeds.
+   - Adds log snippets, tracks a failure streak, and auto-closes when the next run succeeds.
+
+3) `token-health-check.yml` — runs daily (and on demand) to ensure the encrypted Google token still works.
+   - Restores `credentials.json`/`token.json`, runs `python main.py --precheck`, and uploads the log.
+   - If credentials are missing or precheck fails, it opens/updates an issue labeled `token-refresh-required` with a nicely formatted action plan (GitHub emails you the issue).
+   - When the check passes again, it comments on and auto-closes the alert issue.
 
 Notes:
 - Never prefix your own repo variables with `GITHUB_` (reserved in Actions).
 - In CI, interactive OAuth isn’t possible; you must provide a valid `token.json` via the secret `GOOGLE_TOKEN_JSON`.
-
-Optional: You can create a separate nightly precheck workflow that runs `python main.py --precheck` to catch credential expiry early.
 
 ---
 

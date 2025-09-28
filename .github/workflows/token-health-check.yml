@@ -1,0 +1,203 @@
+name: Token health check
+
+on:
+  schedule:
+    - cron: '15 5 * * *' # daily at 05:15 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+jobs:
+  credential-precheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Restore Google OAuth credentials
+        id: restore_creds
+        continue-on-error: true
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
+        run: |
+          if [ -z "$GOOGLE_CREDENTIALS_JSON" ]; then
+            echo 'Missing secret GOOGLE_CREDENTIALS_JSON' | tee precheck.log
+            exit 1
+          fi
+          if [ -z "$GOOGLE_TOKEN_JSON" ]; then
+            echo 'Missing secret GOOGLE_TOKEN_JSON' | tee precheck.log
+            exit 1
+          fi
+          echo "$GOOGLE_CREDENTIALS_JSON" > credentials.json
+          echo "$GOOGLE_TOKEN_JSON" > token.json
+
+      - name: Run credential precheck
+        id: run_precheck
+        if: ${{ steps.restore_creds.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python main.py --precheck | tee precheck.log
+
+      - name: Record status
+        id: status
+        run: |
+          reason="none"
+          if [ "${RESTORE_OUTCOME}" != "success" ]; then
+            reason="restore"
+          elif [ "${PRECHECK_OUTCOME}" = "failure" ]; then
+            reason="precheck"
+          fi
+          echo "reason=$reason" >> $GITHUB_OUTPUT
+        env:
+          RESTORE_OUTCOME: ${{ steps.restore_creds.outcome }}
+          PRECHECK_OUTCOME: ${{ steps.run_precheck.outcome }}
+
+      - name: Upload precheck log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: token-precheck-log
+          path: precheck.log
+          if-no-files-found: ignore
+
+      - name: Prepare log snippet
+        if: ${{ steps.status.outputs.reason != 'none' }}
+        id: log_snippet
+        run: |
+          if [ -f precheck.log ]; then
+            echo "snippet<<'EOF'" >> $GITHUB_OUTPUT
+            tail -n 40 precheck.log >> $GITHUB_OUTPUT
+            echo 'EOF' >> $GITHUB_OUTPUT
+          else
+            echo "snippet<<'EOF'" >> $GITHUB_OUTPUT
+            echo 'No log output captured.' >> $GITHUB_OUTPUT
+            echo 'EOF' >> $GITHUB_OUTPUT
+
+      - name: Create or update token refresh alert
+        if: ${{ steps.status.outputs.reason != 'none' }}
+        uses: actions/github-script@v7
+        env:
+          LOG_SNIPPET: ${{ steps.log_snippet.outputs.snippet }}
+          FAILURE_REASON: ${{ steps.status.outputs.reason }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const alertLabel = 'token-refresh-required';
+            const auxLabel = 'ci-alert';
+
+            async function ensureLabel(name, color, description) {
+              try {
+                await github.rest.issues.createLabel({ owner, repo, name, color, description });
+              } catch (error) {
+                if (error.status !== 422) throw error;
+              }
+            }
+
+            await ensureLabel(alertLabel, '5319e7', 'Action required: refresh Google OAuth token');
+            await ensureLabel(auxLabel, '0e8a16', 'General automation alert');
+
+            const existing = await github.rest.issues.listForRepo({
+              owner,
+              repo,
+              state: 'open',
+              labels: alertLabel,
+            });
+
+            const reason = process.env.FAILURE_REASON;
+            const problem = reason === 'restore'
+              ? 'The workflow could not restore your encrypted Google credentials from repository secrets.'
+              : 'The credential pre-check (`python main.py --precheck`) failed.';
+
+            const snippet = process.env.LOG_SNIPPET || 'No log output captured.';
+
+            const body = [
+              'Hi there 👋',
+              '',
+              'Your Google OAuth token used by the referral mailer needs attention.',
+              '',
+              '### What happened?',
+              `- ${problem}`,
+              '- Without a fresh token, the Gmail API cannot send any referral emails.',
+              '',
+              '### Fix it in five minutes',
+              '1. On your laptop, delete the existing `token.json` in the project root (keep `credentials.json`).',
+              '2. Run `python main.py` locally. Approve the Google consent screen so a new token is saved.',
+              '3. Confirm everything with `python main.py --precheck` (exit status `0`).',
+              '4. Copy the **entire** contents of the new `token.json` and update the repository secret **GOOGLE_TOKEN_JSON** (Settings → Secrets and variables → Actions → Repository secrets).',
+              '5. Rerun the **Token health check** workflow manually to verify the fix.',
+              '',
+              '### Helpful log tail',
+              '```text',
+              snippet,
+              '```',
+              '',
+              'You can also consult the README section **Automation with GitHub Actions → Token health check** for the full playbook.',
+              '',
+              '*This alert will close automatically the next time the health check succeeds.*',
+              '',
+            ].join('\n');
+
+            const title = 'Refresh Google OAuth token for referral mailer';
+
+            if (existing.data.length === 0) {
+              await github.rest.issues.create({
+                owner,
+                repo,
+                title,
+                body,
+                labels: [alertLabel, auxLabel],
+              });
+            } else {
+              const issueNumber = existing.data[0].number;
+              await github.rest.issues.update({ owner, repo, issue_number: issueNumber, body });
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: issueNumber,
+                body: 'Automated reminder: credentials still failing the token health check. Please refresh the token.',
+              });
+            }
+
+      - name: Close token refresh alert on success
+        if: ${{ steps.status.outputs.reason == 'none' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const alertLabel = 'token-refresh-required';
+            const { data } = await github.rest.issues.listForRepo({ owner, repo, state: 'open', labels: alertLabel });
+            if (!data.length) {
+              return;
+            }
+            const issue = data[0];
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: issue.number,
+              body: 'Token health check succeeded again. Closing this alert. ✅',
+            });
+            await github.rest.issues.update({ owner, repo, issue_number: issue.number, state: 'closed' });
+
+      - name: Fail workflow when token invalid
+        if: ${{ steps.status.outputs.reason != 'none' }}
+        run: exit 1

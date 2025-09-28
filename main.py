@@ -213,19 +213,56 @@ def preflight_validate_credentials():
     except Exception as e:
         raise RuntimeError(f'token.json invalid JSON: {e}')
 
+    # Ensure the token can actually instantiate Google credentials and refresh if needed
+    try:
+        creds = Credentials.from_authorized_user_info(token_doc, SCOPES)
+    except Exception as e:
+        raise RuntimeError(f'token.json could not be loaded as Google credentials: {e}')
+
+    if not creds:
+        raise RuntimeError('token.json did not contain usable OAuth credentials.')
+
+    if not creds.valid:
+        if creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+                with open('token.json', 'w', encoding='utf-8') as token:
+                    token.write(creds.to_json())
+            except Exception as e:
+                raise RuntimeError(f'Google OAuth token refresh failed: {e}')
+        else:
+            raise RuntimeError('Google OAuth token is invalid or missing a refresh token; recreate token.json locally and update the secret.')
+
+    if not creds.valid:
+        raise RuntimeError('Google OAuth token is still invalid after refresh; regenerate token.json and update the secret.')
+
     # Scope sanity (best-effort: token file often has 'scopes')
     needed_scopes = set(SCOPES)
-    token_scopes = set(token_doc.get('scopes', []) or token_doc.get('scope', '').split())
+    token_scopes_raw = token_doc.get('scopes', []) or token_doc.get('scope', '').split()
+    token_scopes = {str(s).strip() for s in token_scopes_raw if str(s).strip()}
     missing_scopes = needed_scopes - token_scopes if token_scopes else set()
     if missing_scopes:
         raise RuntimeError(f'token.json missing required scopes: {missing_scopes}')
 
-    # Best-effort Gmail profile fetch to ensure token isn't revoked
-    try:
-        svc = get_service()
-        svc.users().getProfile(userId='me').execute()
-    except Exception as e:
-        raise RuntimeError(f'Gmail profile check failed (token may be revoked/insufficient scopes): {e}')
+    # Ensure gmail.send scope exists even if scope list was empty
+    if 'https://www.googleapis.com/auth/gmail.send' not in token_scopes:
+        raise RuntimeError('token.json missing gmail.send scope (required). Recreate the token with required permissions.')
+
+    # Best-effort Gmail profile fetch only when read scopes are present.
+    gmail_profile_scopes = {
+        'https://www.googleapis.com/auth/gmail.readonly',
+        'https://www.googleapis.com/auth/gmail.metadata',
+        'https://www.googleapis.com/auth/gmail.labels',
+        'https://mail.google.com/'
+    }
+    if gmail_profile_scopes & token_scopes:
+        try:
+            svc = get_service()
+            svc.users().getProfile(userId='me').execute()
+        except Exception as e:
+            raise RuntimeError(f'Gmail profile check failed (token may be revoked/insufficient scopes): {e}')
+    else:
+        _log('Skipping Gmail profile check (token lacks Gmail read scopes). gmail.send scope verified.')
 
     return True
 
