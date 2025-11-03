@@ -55,8 +55,8 @@ def generate_email_with_llm(config: AppConfig, row_dict: dict, inspiration_kind:
     company = row_dict.get("company", "")
     role = row_dict.get("role", "")
     note = row_dict.get("personalized_note", "")
-    job_link = row_dict.get("job_link", "")
-    job_id = row_dict.get("job_id", "")
+    job_link = (row_dict.get("job_link") or "").strip()
+    job_id = (row_dict.get("job_id") or "").strip()
 
     style_text: Optional[str] = None
     if inspiration_kind in {"cold", "warm"}:
@@ -92,14 +92,21 @@ def generate_email_with_llm(config: AppConfig, row_dict: dict, inspiration_kind:
             "You may mention that a resume is attached.\n"
         )
 
+    job_reference_lines = []
+    if job_id:
+        job_reference_lines.append(f"Job ID: {job_id}")
+    if job_link:
+        job_reference_lines.append(f"Job Link: {job_link}")
+    job_reference_text = "\n".join(job_reference_lines) if job_reference_lines else ""
+
     user_prompt = f"""{style_block}{intent_line}
 Recipient: {name}
 Company: {company}
 Role: {role}
 Personalization: {note or '(none)'}
-Job Link: {job_link or '(not provided)'}
-Job ID: {job_id or '(not provided)'}
 Candidate: Ashutosh Choudhari — DS/ML/AI engineer. Portfolio: https://4ashutosh98.github.io
+{job_reference_text}
+Guidance: Mention the job link only if one is provided above. Focus on role and job ID when referencing the opportunity.
 Return JSON only."""
 
     if config.llm.provider == "azure":

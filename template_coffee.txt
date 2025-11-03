@@ -8,7 +8,7 @@ A bit about me: I’m Ashutosh Choudhari (DS/ML/AI). {{ personalized_note | defa
 
 If you have time for a 15–20 minute chat, I’d appreciate it. I’m exploring this role and would value your perspective. If it makes sense after we chat, I’d be grateful to discuss how best to proceed—including the referral process.
 
-{{ 'Role link: ' + job_link if job_link }}{{ '\nJob ID: ' + job_id if job_id }}
+{{ 'Job ID: ' + job_id if job_id }}{{ '\nPosting link (optional): ' + job_link if job_link }}
 
 Thanks for considering, and no pressure if your schedule is full.
 

@@ -5,8 +5,8 @@ Hi {{ name }},
 Hope you’re well. I’m applying for {{ role }} at {{ company }}.
 {% if personalized_note %}{{ personalized_note }}
 {% endif %}
-{% if job_link %}Role link: {{ job_link }}
-{% endif %}{% if job_id %}Job ID: {{ job_id }}
+{% if job_id %}Job ID: {{ job_id }}
+{% endif %}{% if job_link %}Posting link (optional): {{ job_link }}
 {% endif %}
 Would you be comfortable referring me internally, or introducing me to the hiring team?
 Happy to share a concise blurb or resume variant that fits the JD.

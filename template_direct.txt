@@ -8,7 +8,7 @@ Briefly about me: I’m Ashutosh Choudhari (DS/ML/AI). {{ personalized_note | de
 
 I’ve attached my resume for context. If there’s a form or specific process you prefer, happy to follow it.
 
-{{ 'Role link: ' + job_link if job_link }}{{ '\nJob ID: ' + job_id if job_id }}
+{{ 'Job ID: ' + job_id if job_id }}{{ '\nPosting link (optional): ' + job_link if job_link }}
 
 Thanks again, and I appreciate your consideration either way.
 
